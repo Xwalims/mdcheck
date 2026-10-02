@@ -1,0 +1,43 @@
+{
+  "name": "mdcheck",
+  "version": "0.1.0",
+  "description": "Zero-dependency markdown link and anchor checker for local files. No network unless you ask for it.",
+  "keywords": [
+    "markdown",
+    "md",
+    "link",
+    "link-checker",
+    "anchor",
+    "slug",
+    "lint",
+    "cli",
+    "zero-dependencies"
+  ],
+  "license": "MIT",
+  "author": "Xwalims",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Xwalims/mdcheck.git"
+  },
+  "bin": {
+    "mdcheck": "bin/mdcheck.js"
+  },
+  "main": "src/index.js",
+  "type": "commonjs",
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node bin/mdcheck.js README.md docs/",
+    "lint": "node bin/mdcheck.js README.md docs/ examples/ ; test $? -eq 1"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
