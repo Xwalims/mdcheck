@@ -15,6 +15,27 @@ npx mdcheck README.md docs/
 ✔ no problems in 3 files (5 links checked, 1 external link skipped)
 ```
 
+<!-- hero -->
+
+[![CI](https://github.com/mdcheck/actions/workflows/ci.yml/badge.svg)](https://github.com/mdcheck/actions/workflows/ci.yml)
+![node 20+](https://img.shields.io/badge/node-20+-brightgreen)
+![MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+![dependencies](https://img.shields.io/badge/dependencies-none-2f6f4f)
+
+## Contents
+
+- [Why](#why)
+- [Install](#install)
+- [Usage](#usage)
+- [What it catches](#what-it-catches)
+- [Exit codes](#exit-codes)
+- [What counts as a problem](#what-counts-as-a-problem)
+  - [Directory links](#directory-links)
+- [Limitations](#limitations)
+- [License](#license)
+
+<!-- /hero -->
+
 ## Why
 
 Broken links in a README are the kind of bug that ships, because nobody reads
