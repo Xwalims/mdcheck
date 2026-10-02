@@ -389,6 +389,81 @@ test('a file is reported at most once even when linked from many places', () => 
   for (const problem of report.problems) assert.strictEqual(problem.file, file);
 });
 
+test('a hidden directory is not walked but is still resolvable as a target', () => {
+  const dir = fixture({
+    'a.md': '[hidden](.hidden/h.md)\n',
+    '.hidden/h.md': '# Hidden\n',
+  });
+  // The link resolves...
+  assert.deepStrictEqual(checkFile(`${dir}/a.md`).problems, []);
+  // ...but the file inside the dot directory is not checked on its own.
+  const report = checkPaths([dir]);
+  assert.strictEqual(report.totals.files, 1);
+  assert.strictEqual(report.files[0].file.endsWith('a.md'), true);
+});
+
+test('several spellings of one file all resolve', () => {
+  const dir = fixture({
+    'a.md': '[1](b.md)\n[2](./b.md)\n[3](b.md#head)\n[4](../b.md)\n',
+    'b.md': '# Head\n',
+  });
+  const report = checkFile(`${dir}/a.md`);
+  // The fourth escapes the fixture directory and genuinely does not exist.
+  assert.strictEqual(report.problems.length, 1);
+  assert.strictEqual(report.problems[0].code, CODES.FILE_NOT_FOUND);
+  assert.strictEqual(report.problems[0].line, 4);
+});
+
+test('a file listed as both a directory member and an explicit path is checked once', () => {
+  const dir = fixture({ 'a.md': '# A\n', 'docs/b.md': '# B\n\n[x](c.md)\n' });
+  const report = checkPaths([dir, `${dir}/a.md`, `${dir}/a.md`]);
+  assert.strictEqual(report.totals.files, 2);
+  assert.strictEqual(report.problems.length, 1);
+});
+
+test('an empty directory is a clean run', () => {
+  const dir = fixture({});
+  const report = checkPaths([dir]);
+  assert.strictEqual(report.ok, true);
+  assert.deepStrictEqual(report.problems, []);
+  assert.strictEqual(report.totals.files, 0);
+});
+
+test('CRLF line endings do not shift reported positions', () => {
+  const dir = fixture({ 'a.md': '# A\r\n\r\n[bad](nope.md)\r\n' });
+  const [problem] = checkFile(`${dir}/a.md`).problems;
+  assert.strictEqual(problem.line, 3);
+  assert.strictEqual(problem.column, 1);
+  assert.strictEqual(problem.code, CODES.FILE_NOT_FOUND);
+});
+
+test('an empty file is clean', () => {
+  const dir = fixture({ 'a.md': '' });
+  assert.deepStrictEqual(checkFile(`${dir}/a.md`).problems, []);
+});
+
+test('a file with no trailing newline still reports correctly', () => {
+  const dir = fixture({ 'a.md': '# A\n\n[bad](nope.md)' });
+  const [problem] = checkFile(`${dir}/a.md`).problems;
+  assert.strictEqual(problem.line, 3);
+});
+
+test('setext headings are not collected for anchors (documented limitation)', () => {
+  // mdcheck recognizes ATX headings only. A link to a setext heading's anchor
+  // is therefore reported as anchor-not-found. This is a known limit, stated
+  // in the README, and pinned here so it cannot change unnoticed.
+  const dir = fixture({ 'a.md': 'Title\n=====\n\n[x](b.md#title)\n', 'b.md': 'Title\n=====\n' });
+  assert.strictEqual(checkFile(`${dir}/a.md`).problems[0].code, CODES.ANCHOR_NOT_FOUND);
+});
+
+test('a heading with no links is still counted as a checked file', () => {
+  const dir = fixture({ 'a.md': '# A\n\n## B\n\n### C\n' });
+  const report = checkFile(`${dir}/a.md`);
+  assert.strictEqual(report.totals.files, 1);
+  assert.strictEqual(report.totals.links, 0);
+  assert.strictEqual(report.ok, true);
+});
+
 // --- exit codes -----------------------------------------------------------
 
 test('a clean run exits 0', () => {
