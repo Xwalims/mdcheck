@@ -36,7 +36,8 @@
   "scripts": {
     "test": "node --test",
     "check": "node bin/mdcheck.js README.md docs/",
-    "lint": "node bin/mdcheck.js README.md docs/ examples/ ; test $? -eq 1"
+    "check:examples": "node bin/mdcheck.js examples/",
+    "selftest": "npm run check && npm test"
   },
   "dependencies": {},
   "devDependencies": {}

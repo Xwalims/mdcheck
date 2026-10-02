@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest supported line, the current LTS, and the newest release.
+        node-version: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      # mdcheck has no dependencies, so there is nothing to install: the
+      # checkout plus node is the whole toolchain.
+      - name: Show versions
+        run: node --version && npm --version
+
+      - name: Run the test suite
+        run: node --test
+
+      - name: Check this project's own markdown
+        run: node bin/mdcheck.js README.md docs/
+
+      - name: Check the CLI entry point is executable
+        run: test -x bin/mdcheck.js
+
+  self-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # mdcheck's own docs must pass mdcheck. examples/ is expected to fail --
+      # it holds deliberately broken markdown that the tests exercise -- so it
+      # is checked for "problems found" rather than "no problems".
+      - name: examples/ must still report its deliberate problems
+        run: |
+          set +e
+          node bin/mdcheck.js examples/ --json > /tmp/examples.json
+          status=$?
+          set -e
+          if [ "$status" -ne 1 ]; then
+            echo "expected exit 1 from examples/, got $status"
+            exit 1
+          fi
+          node -e '
+            const r = require("/tmp/examples.json");
+            if (r.ok !== false || r.problems.length === 0) {
+              console.error("examples/ should contain problems");
+              process.exit(1);
+            }
+            console.log(`examples/ reports ${r.problems.length} deliberate problems`);
+          '
