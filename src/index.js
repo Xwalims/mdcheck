@@ -56,7 +56,7 @@ function resolveOptions(options = {}) {
       ? normalizeExtensions(options.extensions)
       : DEFAULT_OPTIONS.extensions,
     indexFiles: options.indexFiles
-      ? normalizeExtensions(options.indexFiles)
+      ? normalizeIndexFiles(options.indexFiles)
       : DEFAULT_OPTIONS.indexFiles,
     checkExternal: Boolean(options.checkExternal),
     followRootAbsolute: Boolean(options.followRootAbsolute),
@@ -65,7 +65,8 @@ function resolveOptions(options = {}) {
 }
 
 /**
- * Accept "md,.markdown" or [".md"] and return [".md", ".markdown"].
+ * Accept "md,.markdown" or [".md"] and return [".md", ".markdown"]. Used for
+ * file extensions, so a leading dot is added when missing.
  * @param {string|string[]} value
  * @returns {string[]}
  */
@@ -76,6 +77,19 @@ function normalizeExtensions(value) {
     .filter(Boolean)
     .map((item) => (item.startsWith('.') ? item : `.${item}`));
   return out.length ? out : [...DEFAULT_OPTIONS.extensions];
+}
+
+/**
+ * Accept "README.md,index.md" or ["README.md"] and return trimmed names.
+ * Unlike extensions these are whole filenames, so no dot is added -- turning
+ * "README.md" into ".README.md" would make the directory check never pass.
+ * @param {string|string[]} value
+ * @returns {string[]}
+ */
+function normalizeIndexFiles(value) {
+  const list = Array.isArray(value) ? value : String(value).split(',');
+  const out = list.map((item) => String(item).trim()).filter(Boolean);
+  return out.length ? out : [...DEFAULT_OPTIONS.indexFiles];
 }
 
 /**
@@ -248,10 +262,11 @@ function checkSource(absolutePath, displayPath, opts, anchorCache, report) {
       destination = definition.destination;
     }
 
-    // Every link reaching this point now has a real destination: reference
-    // usages were resolved above, and definitions carry their own. Both land
-    // here, which is what you want -- a broken target is reported at every
-    // place it is written, including the [id]: definition line itself.
+    // Every link reaching this point has a real destination: reference usages were
+    // resolved above, and definitions carry their own. The target is parsed
+    // from the destination a renderer would use, while `rawSource` keeps the
+    // untrimmed span -- a trailing space is only visible in the source.
+    const rawSource = link.rawDestination ?? destination ?? '';
     const target = parseTarget(destination ?? '');
 
     if (target.external) {
@@ -262,7 +277,7 @@ function checkSource(absolutePath, displayPath, opts, anchorCache, report) {
       // --check-external does not fetch. It validates the shape of the URL and
       // flags whitespace and empty targets, which are the offline-detectable
       // failure modes. This keeps mdcheck network-free by design.
-      checkExternalShape(report, displayPath, link, target);
+      checkExternalShape(report, displayPath, link, target, rawSource);
       continue;
     }
 
@@ -278,23 +293,33 @@ function checkSource(absolutePath, displayPath, opts, anchorCache, report) {
       continue;
     }
 
-    const rawWithTrailingSpace = /[ \t]$/.test(target.raw) && target.file !== '';
-    if (rawWithTrailingSpace) {
+    // "x.md " is broken but "x.md  \"Title\"" is fine. So: cut the span at any
+    // title, unwrap angle brackets, and only then look at the tail -- the
+    // space must survive to be detected. parseDestinationAndTitle already
+    // trimmed `destination`, so this reads the untrimmed source span.
+    const destSource = String(rawSource)
+      .split(/[ \t]*["'(]/)[0]
+      .replace(/^<(.*)>$/, '$1');
+    if (/[ \t]$/.test(destSource) && target.file !== '') {
       addProblem(report, {
         file: displayPath,
         line: link.line,
         column: link.column,
         code: CODES.TRAILING_WHITESPACE_IN_URL,
-        target: target.raw,
+        target: rawSource.trim(),
         message: message(
           CODES.TRAILING_WHITESPACE_IN_URL,
-          `URL ends with whitespace: "${target.raw}"`
+          `URL ends with whitespace: "${rawSource.trim()}"`
         ),
       });
       continue;
     }
 
-    if (target.absolute && !opts.followRootAbsolute) {
+    // An absolute path is reported as a warning only. It is still resolved and
+    // validated, because on a site served from "/" the file may well exist --
+    // but the finding is about portability, not about the file being broken.
+    const warnAbsolute = target.absolute && !opts.followRootAbsolute;
+    if (warnAbsolute) {
       addProblem(report, {
         file: displayPath,
         line: link.line,
@@ -307,6 +332,7 @@ function checkSource(absolutePath, displayPath, opts, anchorCache, report) {
         ),
         severity: SEVERITY.warning,
       });
+      continue;
     }
 
     // Resolve the file part.
@@ -407,14 +433,16 @@ function checkSource(absolutePath, displayPath, opts, anchorCache, report) {
 
 /**
  * Offline checks for external links: only the failure modes that are visible
- * without a network round trip.
+ * without a network round trip. mdcheck never opens a socket, so
+ * --check-external means "check the shape", not "fetch the URL".
  * @param {object} report
  * @param {string} displayPath
  * @param {object} link
  * @param {object} target
  */
-function checkExternalShape(report, displayPath, link, target) {
-  if (/[ \t]$/.test(target.raw)) {
+function checkExternalShape(report, displayPath, link, target, rawSource) {
+  const url = String(rawSource ?? target.raw);
+  if (/[ \t]$/.test(url)) {
     addProblem(report, {
       file: displayPath,
       line: link.line,
@@ -423,18 +451,25 @@ function checkExternalShape(report, displayPath, link, target) {
       target: target.raw,
       message: message(
         CODES.TRAILING_WHITESPACE_IN_URL,
-        `URL ends with whitespace: "${target.raw}"`
+        `URL ends with whitespace: "${url.trim()}"`
       ),
     });
   }
-  if (target.raw.trim().length <= target.raw.indexOf(':') + 1) {
+  // A URL with a scheme but no host or path: "https:", "https://", "mailto:".
+  // These are typos that would silently link nowhere. Anything with a
+  // non-slash character after the scheme is treated as a real destination --
+  // deciding whether a host resolves is a network question, and mdcheck does
+  // not ask network questions.
+  const afterScheme = target.raw.slice(target.raw.indexOf(':') + 1).trim();
+  const hostless = afterScheme === '' || /^\/+$/.test(afterScheme) || afterScheme === '?';
+  if (hostless) {
     addProblem(report, {
       file: displayPath,
       line: link.line,
       column: link.column,
       code: CODES.EMPTY_TARGET,
       target: target.raw,
-      message: message(CODES.EMPTY_TARGET, `URL has no host or path: "${target.raw}"`),
+      message: message(CODES.EMPTY_TARGET, `URL has no host or path: "${target.raw}"`, true),
     });
   }
 }
@@ -544,6 +579,7 @@ module.exports = {
   checkPaths,
   resolveOptions,
   normalizeExtensions,
+  normalizeIndexFiles,
   anchorKey,
   collectFiles,
 };

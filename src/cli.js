@@ -8,7 +8,13 @@
  * bin/mdcheck.js assigns it.
  */
 
-const { EXIT, DEFAULT_OPTIONS, checkPaths, normalizeExtensions } = require('./index.js');
+const {
+  EXIT,
+  DEFAULT_OPTIONS,
+  checkPaths,
+  normalizeExtensions,
+  normalizeIndexFiles,
+} = require('./index.js');
 const { formatText, formatJson, shouldUseColor } = require('./report.js');
 
 const USAGE = `mdcheck - zero-dependency markdown link and anchor checker
@@ -52,6 +58,12 @@ const VALUED = new Map([
   ['--ext', 'extensions'],
   ['--index-file', 'indexFiles'],
 ]);
+
+/** Each valued option normalizes its own syntax: ".md" vs "README.md". */
+const NORMALIZER = {
+  extensions: normalizeExtensions,
+  indexFiles: normalizeIndexFiles,
+};
 
 /**
  * Parse argv into options and paths.
@@ -116,7 +128,7 @@ function parseArgs(argv) {
       if (value === undefined || value === '') {
         return { ok: false, error: `${name} needs a value` };
       }
-      options[VALUED.get(name)] = normalizeExtensions(value);
+      options[VALUED.get(name)] = NORMALIZER[VALUED.get(name)](value);
       continue;
     }
     return { ok: false, error: `unknown option: ${name}` };

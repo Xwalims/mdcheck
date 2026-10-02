@@ -35,7 +35,11 @@ const KIND = Object.freeze({
   DEFINITION: 'definition',
 });
 
+/** Any URL with a scheme, e.g. https:, mailto:, ftp:. */
 const EXTERNAL_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+/** A bare email autolink, e.g. <user@example.com>. Has no scheme but is still
+ *  an external destination, not a relative file. */
+const EMAIL = /^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$/;
 
 /**
  * Blank out inline code spans in a line, preserving length and columns.
@@ -127,7 +131,18 @@ function findParenEnd(masked, open) {
 }
 
 /**
- * Pull the destination and optional title out of the inside of `(...)`.
+ * The destination text exactly as written between the parens, with only
+ * *leading* whitespace removed and any trailing whitespace kept. Keeping it is
+ * what lets mdcheck report "[a](x.md )" as a trailing-whitespace bug: the space
+ * is part of the URL a renderer will use, and it only exists in the source.
+ * @param {string} inner the text between the parentheses
+ * @returns {string}
+ */
+function rawDestinationSpan(inner) {
+  return String(inner).replace(/^[ \t]+/, '');
+}
+
+/**
  * @param {string} inner
  * @returns {{destination: string, title: string|null, ok: boolean}}
  */
@@ -195,7 +210,7 @@ function parseTarget(dest) {
     raw,
     file,
     anchor,
-    external: EXTERNAL_SCHEME.test(trimmed),
+    external: EXTERNAL_SCHEME.test(trimmed) || EMAIL.test(trimmed),
     absolute: file.startsWith('/'),
     empty: trimmed.length === 0,
   };
@@ -325,7 +340,12 @@ function extract(source) {
         const close = masked.indexOf('>', i + 1);
         if (close !== -1) {
           const body = line.slice(i + 1, close);
-          if (/^[a-z][a-z0-9+.-]*:[^\s<>]+$/i.test(body) || /^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$/.test(body)) {
+          // A scheme followed by anything (including nothing) is an autolink:
+          // "https://" and "mailto:" are malformed URLs, but they are still
+          // autolinks, and mdcheck reports them rather than silently skipping.
+          const isUri = /^[a-z][a-z0-9+.-]*:[^\s<>]*$/i.test(body);
+          const isEmail = /^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$/.test(body);
+          if (isUri || isEmail) {
             links.push({
               kind: KIND.AUTOLINK,
               destination: body,
@@ -363,6 +383,7 @@ function extract(source) {
           links.push({
             kind: KIND.DEFINITION,
             destination: dest,
+            rawDestination: dest,
             title: titleMatch ? (titleMatch[2] ?? titleMatch[3] ?? titleMatch[4]) : null,
             label: rawLabel,
             referenceId: normalizeLabel(rawLabel),
@@ -401,10 +422,12 @@ function extract(source) {
             i = labelEnd + 1;
             continue;
           }
-          const parsed = parseDestinationAndTitle(line.slice(labelEnd + 2, parenEnd - 1));
+          const inner = line.slice(labelEnd + 2, parenEnd - 1);
+          const parsed = parseDestinationAndTitle(inner);
           links.push({
             kind: KIND.IMAGE,
             destination: parsed.destination,
+            rawDestination: rawDestinationSpan(inner),
             title: parsed.title,
             label: line.slice(i + 2, labelEnd),
             referenceId: null,
@@ -448,10 +471,15 @@ function extract(source) {
             i = labelEnd + 1;
             continue;
           }
-          const parsed = parseDestinationAndTitle(line.slice(labelEnd + 2, parenEnd - 1));
+          const inner = line.slice(labelEnd + 2, parenEnd - 1);
+          const parsed = parseDestinationAndTitle(inner);
           links.push({
             kind: KIND.INLINE,
             destination: parsed.destination,
+            // The untrimmed destination span, so a trailing space that
+            // parseDestinationAndTitle removed is still detectable: "[a](x.md )"
+            // is a real 404 and the space only exists in the source line.
+            rawDestination: rawDestinationSpan(inner),
             title: parsed.title,
             label,
             referenceId: null,

@@ -99,6 +99,13 @@ function finalize(report) {
   report.problems.sort((a, b) =>
     a.file === b.file ? a.line - b.line || a.column - b.column : a.file < b.file ? -1 : 1
   );
+  // One entry per distinct file, in sorted order: addProblem can be called
+  // many times for the same file, and a repeated header line helps nobody.
+  const seen = new Map();
+  for (const file of report.files) {
+    if (!seen.has(file.file)) seen.set(file.file, { file: file.file, problems: 0 });
+  }
+  report.files = [...seen.values()];
   report.files.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
   const perFile = new Map();
   for (const problem of report.problems) {
@@ -141,14 +148,18 @@ function paint(enabled, code, text) {
 }
 
 /**
- * Decide whether to emit ANSI color.
+ * Decide whether to emit ANSI color. Follows the no-color.org conventions:
+ * NO_COLOR disables color when set to any non-empty value, FORCE_COLOR
+ * enables it unless it is "0", and an empty NO_COLOR means "unset" so that a
+ * test harness can set NO_COLOR='' to clear an inherited value.
  * @param {{noColor: boolean, stream: {isTTY?: boolean}, env: object}} opts
  * @returns {boolean}
  */
 function shouldUseColor(opts) {
   if (opts.noColor) return false;
-  if (opts.env && opts.env.NO_COLOR !== undefined) return false;
-  if (opts.env && opts.env.FORCE_COLOR !== undefined && opts.env.FORCE_COLOR !== '0') return true;
+  const env = opts.env || {};
+  if (env.NO_COLOR !== undefined && env.NO_COLOR !== '') return false;
+  if (env.FORCE_COLOR !== undefined && env.FORCE_COLOR !== '0') return true;
   return Boolean(opts.stream && opts.stream.isTTY);
 }
 
@@ -184,18 +195,23 @@ function formatText(report, opts = {}) {
 
   if (report.problems.length === 0) {
     const n = report.totals.files;
-    const label = n === 1 ? 'file' : 'files';
+    const fileWord = n === 1 ? 'file' : 'files';
+    const linkWord = report.totals.links === 1 ? 'link' : 'links';
     const verb = report.totals.skippedExternal
       ? `, ${report.totals.skippedExternal} external link${report.totals.skippedExternal === 1 ? '' : 's'} skipped`
       : '';
     return (
       paint(color, ANSI.green, '✔') +
-      ` no problems in ${n} ${label} (${report.totals.links} links checked${verb})\n`
+      ` no problems in ${n} ${fileWord} (${report.totals.links} ${linkWord} checked${verb})\n`
     );
   }
 
+  // The number of files comes from the report's own file list, so a report
+  // built by hand (in tests) is summarized as accurately as one from a run.
+  const files = Math.max(report.totals.files, report.files.length);
   const n = report.problems.length;
-  const summary = `${n} problem${n === 1 ? '' : 's'} in ${report.totals.files} file${report.totals.files === 1 ? '' : 's'}`;
+  const summary =
+    `${n} problem${n === 1 ? '' : 's'} in ${files} file${files === 1 ? '' : 's'}`;
   const parts = Object.entries(report.counts)
     .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
     .map(([code, count]) => `${count} ${code}`);
