@@ -1,5 +1,7 @@
 'use strict';
 
+const { GITHUB_SLUG_STRIP } = require('./github-slug-regex.js');
+
 /**
  * mdcheck / slug.js
  *
@@ -16,39 +18,32 @@
  *
  *   2. The text is lowercased (simple Unicode lowercase, not locale-aware).
  *
- *   3. Every character that is not a Unicode letter (L*), number (N*),
- *      combining mark (M*), underscore, hyphen or space is deleted. This is
- *      what removes punctuation (`.,!?`), symbols (`&`, `+`, `#`, `$`, `%`),
- *      emoji (Extended_Pictographic) and control characters. Keeping
- *      letters/numbers is what preserves non-ASCII prose: "café naïve"
- *      slugifies to "café-naïve", not "caf-naive".
+ *   3. Every character GitHub strips is deleted. That set comes from
+ *      github-slugger (see `github-slug-regex.js`), NOT from a Unicode property
+ *      class: GitHub removes numbers such as `½`, most symbol blocks and the
+ *      astral planes wholesale, while `\p{N}` would keep them.
  *
- *   4. Remaining whitespace (spaces and tabs; newlines never survive step 3 as
- *      whitespace -- they are simply deleted, so ATX headings never produce
- *      hyphens from the trailing newline) becomes a single hyphen each, so
- *      consecutive spaces produce consecutive hyphens.
+ *   4. Every remaining *space* (U+0020 only) becomes one hyphen, so consecutive
+ *      spaces produce consecutive hyphens. Tabs are not spaces: they are
+ *      stripped in step 3, which is why `a\tb` and `ab` slug identically.
  *
- *   5. Leading and trailing hyphens are stripped. "# ---" therefore yields the
- *      empty slug rather than "---".
+ *   5. Nothing is trimmed. Leading and trailing hyphens are real output:
+ *      `# --json` becomes `--json`, and a heading of only punctuation becomes
+ *      the empty string. An earlier version of this file trimmed edge hyphens
+ *      as a "friendlier" rule and that was simply wrong -- it turned valid
+ *      links into reported failures.
  *
  *   6. Duplicate slugs get a numeric suffix in document order: the first
  *      "Usage" is "usage", the second "usage-1", the third "usage-2".
  *      De-duplication is a loop, not a counter, so a literal heading "Foo-1"
  *      appearing between two "Foo" headings is never handed out twice -- the
- *      second "Foo" skips past the taken "foo-1" and becomes "foo-2". This is
- *      a literal port of github-slugger, which is what GitHub uses.
+ *      second "Foo" skips past the taken "foo-1" and becomes "foo-2". This is a
+ *      literal port of github-slugger, which is what GitHub uses.
  *
  * The empty string is a legitimate slug result. Anchors are compared
  * case-insensitively at check time, because some renderers lowercase and
  * percent-decode them.
  */
-
-/** Characters deleted in step 3 (anything not kept). */
-const STRIP = /[^\p{L}\p{N}\p{M}_\- \t]/gv;
-/** Whitespace collapsed into hyphens in step 4. */
-const WS = /[ \t]/g;
-/** Leading/trailing hyphens removed in step 5. */
-const EDGE_HYPHENS = /^-+|-+$/g;
 
 /**
  * Normalize a link-text or reference-id for *matching* purposes. CommonMark
@@ -62,16 +57,17 @@ function normalizeLabel(label) {
 
 /**
  * Steps 2-5 of the algorithm: the slug for already-stripped heading text,
- * ignoring duplicates.
+ * ignoring duplicates. Note what is NOT here: no trimming of edge hyphens, no
+ * collapsing of runs of spaces, no special handling of tabs. Those are all
+ * handled by the strip table itself, exactly as github-slugger does it.
  * @param {string} text heading text with inline markup already removed
  * @returns {string} slug, possibly empty
  */
 function slugify(text) {
   return String(text)
     .toLowerCase()
-    .replace(STRIP, '')
-    .replace(WS, '-')
-    .replace(EDGE_HYPHENS, '');
+    .replace(GITHUB_SLUG_STRIP, '')
+    .replace(/ /g, '-');
 }
 
 /**
@@ -130,8 +126,24 @@ function stripInlineMarkup(s) {
   out = out.replace(/\[([^\]]*)\]\[[^\]]*\]/g, '$1');
   // Raw HTML tags are markup, not text.
   out = out.replace(/<\/?[A-Za-z][^>]*>/g, '');
+
   // Strikethrough / strong / emphasis delimiters.
-  out = out.replace(/\*\*|__|~~|\*|_/g, '');
+  //
+  // An underscore is NOT an emphasis delimiter when it sits between two word
+  // characters: CommonMark calls this the "intraword" rule, and it exists so
+  // that identifiers like `snake_case` and `max_length` render literally instead
+  // of turning into italics. GitHub follows it, so `# snake_case-kept` really
+  // does slug to `snake_case-kept`. Deleting every `_` here is a false-positive
+  // generator: it makes mdcheck reject a link that works on github.com.
+  //
+  // The lookarounds also skip protected private-use codepoints, which are not
+  // word characters, so an escaped `\_` next to a word stays intact.
+  out = out
+    .replace(/\*\*/g, '')
+    .replace(/(?<![A-Za-z0-9])__(?=\S)|(?<=\S)__(?![A-Za-z0-9])/g, '')
+    .replace(/~~/g, '')
+    .replace(/\*/g, '')
+    .replace(/(?<![A-Za-z0-9])_(?=\S)|(?<=\S)_(?![A-Za-z0-9])/g, '');
 
   // Restore the protected literal text.
   if (literal.size > 0) {

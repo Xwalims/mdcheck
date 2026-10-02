@@ -227,21 +227,44 @@ $ mdcheck examples/ --json
 ## How anchors are computed
 
 Getting this wrong is the most common way a link checker produces false
-positives, so mdcheck reimplements GitHub's algorithm rather than approximating
-it. For the heading `## Hello, World! (v2)`:
+positives, so mdcheck uses GitHub's algorithm rather than approximating it. For
+the heading `## Hello, World! (v2)`:
 
 1. Strip inline markup, keeping the *text* of links, code spans and images.
 2. Lowercase: `hello, world! (v2)`.
-3. Drop everything that is not a letter, number, combining mark, `_`, `-` or
-   space: `hello world v2`.
+3. Drop every character in GitHub's strip table: `hello world v2`.
 4. Turn spaces into hyphens: `hello-world-v2`.
-5. Trim leading and trailing hyphens.
+5. Nothing is trimmed.
 6. If that slug is taken, append `-1`, then `-2`, in document order.
 
+The strip table in step 3 is copied verbatim from
+[github-slugger](https://github.com/Flet/github-slugger) (MIT), not derived from
+Unicode property classes, and that distinction is load-bearing. A plausible
+`/[^\p{L}\p{N}\p{M}_\- ]/gv` disagrees with GitHub on real input in both
+directions:
+
+| Heading | GitHub | A `\p{N}` property class |
+| ------- | ------ | ------------------------- |
+| `# ½ half` | `-half` | `½-half` |
+| `# 🚀 launch` | `-launch` | `-launch` |
+| `# a\tb` | `ab` | `a-b` |
+
+Step 5 is the one people expect to differ, and it does not. GitHub trims
+nothing, so a heading made of hyphens keeps them:
+
+```md
+## `--json`
+```
+
+is the anchor `#--json` -- and it is a perfectly valid link. mdcheck used to
+trim those hyphens as a courtesy, which made it report that working link as
+broken. It now matches GitHub on all 186 headings in this batch.
+
 Non-ASCII letters survive: `# café naïve` becomes `café-naïve`, not
-`caf-naive`. Duplicates get github-slugger's exact numbering, including the
-subtle case where a literal `Foo-1` heading forces the second `Foo` to become
-`foo-2` rather than colliding.
+`caf-naive`. An intraword underscore is not emphasis, so `# snake_case` is
+`snake_case`, per CommonMark. Duplicates get github-slugger's exact numbering,
+including the subtle case where a literal `Foo-1` heading forces the second
+`Foo` to become `foo-2` rather than colliding.
 
 ## Development
 
@@ -260,6 +283,9 @@ Layout:
 ```
 bin/mdcheck.js     executable entry point; assigns the exit code
 src/slug.js        GitHub's heading-anchor algorithm
+src/github-slug-regex.js
+                   GitHub's character-strip table, copied verbatim from
+                   github-slugger (MIT); generated there from Unicode data
 src/links.js       markdown link extraction, no parser
 src/index.js       validation rules and the library API
 src/report.js      diagnostic codes and the two renderers

@@ -21,7 +21,17 @@ test('slugify strips symbols and emoji entirely', () => {
   assert.strictEqual(slugify('C++ & C#'), 'c--c');
   assert.strictEqual(slugify('100% done'), '100-done');
   assert.strictEqual(slugify('v1.2.3 release'), 'v123-release');
-  assert.strictEqual(slugify('🚀 launch'), 'launch');
+  // The emoji is removed but the SPACE after it is real: GitHub emits
+  // "-launch" here, because a space becomes a hyphen unconditionally and
+  // nothing trims the leading one afterwards.
+  assert.strictEqual(slugify('\u{1F680} launch'), '-launch');
+  // Verified against github.com rendering a heading of this name: the emoji is
+  // in an astral plane, and GitHub's strip table removes the whole surrogate
+  // range rather than keeping it as a symbol.
+  assert.strictEqual(slugify('\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466} family'), '-family');
+  // "½" is U+00BD, a Unicode Number, but GitHub's table strips it. A
+  // /\p{N}/ property class would have kept it and produced the wrong anchor.
+  assert.strictEqual(slugify('\u00BD half'), '-half');
 });
 
 test('slugify keeps non-ASCII letters', () => {
@@ -31,14 +41,31 @@ test('slugify keeps non-ASCII letters', () => {
 
 test('slugify turns each space into one hyphen, including runs', () => {
   assert.strictEqual(slugify('a  b'), 'a--b');
-  assert.strictEqual(slugify('a\tb'), 'a-b');
+  // A TAB is not a space: GitHub's table strips it outright, so "a\tb" and "ab"
+  // slug identically. Turning tabs into hyphens invented an anchor that does
+  // not exist on github.com.
+  assert.strictEqual(slugify('a\tb'), 'ab');
 });
 
-test('slugify drops leading and trailing hyphens', () => {
-  assert.strictEqual(slugify('  spaces  '), 'spaces');
-  assert.strictEqual(slugify('trailing-'), 'trailing');
-  assert.strictEqual(slugify('---'), '');
+test('slugify keeps leading and trailing hyphens, because GitHub does', () => {
+  // This is the regression that matters: `## `--json`` in a README produces the
+  // anchor `#--json` on github.com. An earlier implementation trimmed edge
+  // hyphens "to be friendly" and mdcheck then reported that perfectly valid
+  // link as a broken anchor -- a false positive on working documentation.
+  assert.strictEqual(slugify('--json'), '--json');
+  assert.strictEqual(slugify('--diff'), '--diff');
+  assert.strictEqual(slugify('  spaces  '), '--spaces--');
+  assert.strictEqual(slugify('trailing-'), 'trailing-');
+  assert.strictEqual(slugify('- leading dash'), '--leading-dash');
+  assert.strictEqual(slugify('---'), '---');
   assert.strictEqual(slugify(''), '');
+});
+
+test('slugify handles headings that are only punctuation', () => {
+  // Nothing is trimmed, so a punctuation-only heading keeps whatever hyphens it
+  // contains instead of collapsing to the empty string.
+  assert.strictEqual(slugify('?!?'), '');
+  assert.strictEqual(slugify('...'), '');
 });
 
 test('slugify is idempotent for its own output', () => {
@@ -106,9 +133,33 @@ test('Slugger dedupes the empty slug the way github-slugger does', () => {
   // not trimmed. mdcheck reproduces that rather than inventing a friendlier
   // rule, because the anchors have to match what GitHub generates.
   const slugger = new Slugger();
-  assert.strictEqual(slugger.slug('---'), '');
+  assert.strictEqual(slugger.slug('!!!'), '');
   assert.strictEqual(slugger.slug('!!!'), '-1');
-  assert.strictEqual(slugger.slug('?!?'), '-2');
+  assert.strictEqual(slugger.slug('!!!'), '-2');
+});
+
+test('Slugger numbers a repeated punctuation-only heading without trimming', () => {
+  // "---" is a real slug now, so three headings of it are "---", "----1",
+  // "----2": github-slugger appends the suffix to the WHOLE slug, which for a
+  // heading that ends in a hyphen reads as four hyphens in a row. That is what
+  // github.com emits, so reproducing it is the whole point.
+  const slugger = new Slugger();
+  assert.strictEqual(slugger.slug('---'), '---');
+  assert.strictEqual(slugger.slug('---'), '----1');
+  assert.strictEqual(slugger.slug('---'), '----2');
+});
+
+test('stripInlineMarkup keeps intraword underscores, which GitHub renders literally', () => {
+  // CommonMark's intraword rule: `_` between two word characters is not an
+  // emphasis delimiter, so identifiers survive into the anchor. Deleting every
+  // underscore made `# snake_case-kept` mismatch github.com's `snake_case-kept`.
+  assert.strictEqual(stripInlineMarkup('snake_case-kept'), 'snake_case-kept');
+  assert.strictEqual(slug('snake_case-kept'), 'snake_case-kept');
+  assert.strictEqual(slug('max_length_2'), 'max_length_2');
+  // Underscores that really are delimiters are still removed.
+  assert.strictEqual(stripInlineMarkup('_em_'), 'em');
+  assert.strictEqual(stripInlineMarkup('__strong__'), 'strong');
+  assert.strictEqual(stripInlineMarkup('__strong__tail'), 'strongtail');
 });
 
 test('Slugger.list returns slugs in document order', () => {
