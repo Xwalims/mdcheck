@@ -8,6 +8,8 @@ const { spawnSync } = require('node:child_process');
 
 const { main, parseArgs, FLAGS, VALUED } = require('../src/cli.js');
 const { checkFile, checkPaths, CODES, EXIT, normalizeExtensions, collectFiles } = require('../src/index.js');
+const { extract } = require('../src/links.js');
+const { slugify } = require('../src/slug.js');
 const { fixture, cleanup } = require('./helpers.js');
 
 const BIN = path.join(__dirname, '..', 'bin', 'mdcheck.js');
@@ -448,12 +450,73 @@ test('a file with no trailing newline still reports correctly', () => {
   assert.strictEqual(problem.line, 3);
 });
 
-test('setext headings are not collected for anchors (documented limitation)', () => {
-  // mdcheck recognizes ATX headings only. A link to a setext heading's anchor
-  // is therefore reported as anchor-not-found. This is a known limit, stated
-  // in the README, and pinned here so it cannot change unnoticed.
-  const dir = fixture({ 'a.md': 'Title\n=====\n\n[x](b.md#title)\n', 'b.md': 'Title\n=====\n' });
+test('setext headings produce anchors, both forms and across files', () => {
+  // A setext heading's anchor is a real anchor on github.com: GitHub renders
+  // the paragraph and its underline as one <h1>/<h2>. This test pins the fix
+  // for a false positive mdcheck used to report on 25 of 30 real-world files.
+  const dir = fixture({
+    'a.md': 'Title\n=====\n\nSub\n---\n\n[x](b.md#title)\n',
+    'b.md': 'Title\n=====\n',
+  });
+  assert.deepStrictEqual(checkFile(`${dir}/a.md`).problems, []);
+  // Both levels, resolvable from the same document.
+  const self = fixture({ 'a.md': 'Title\n=====\n\nSub\n---\n\n[j](#title)\n\n[k](#sub)\n' });
+  assert.deepStrictEqual(checkFile(`${self}/a.md`).problems, []);
+});
+
+test('a multi-line paragraph is one setext heading, slugs from all its lines', () => {
+  // The heading's text is the whole paragraph, so the anchor joins every line
+  // with a hyphen rather than keeping only the first.
+  const dir = fixture({ 'a.md': 'Setext Beta\nspans two\nsource lines\n-------------\n' });
+  const doc = extract('Setext Beta\nspans two\nsource lines\n-------------\n');
+  assert.strictEqual(doc.headings.length, 1);
+  assert.strictEqual(doc.headings[0].level, 2);
+  assert.strictEqual(slugify(doc.headings[0].text), 'setext-beta-spans-two-source-lines');
+  assert.deepStrictEqual(checkFile(`${dir}/a.md`).problems, []);
+});
+
+test('an underline with no paragraph above it is a thematic break, not a heading', () => {
+  // After a blank line, after an ATX heading, and at the very start of a file
+  // there is no paragraph for cmark-gfm to convert, so these produce no anchor
+  // beyond the ATX heading that is already there.
+  const src = '---\n\n# ATX\n---\n\n===\n';
+  assert.deepStrictEqual(extract(src).headings, [
+    { level: 1, text: 'ATX', line: 3, column: 1 },
+  ]);
+});
+
+test('a fenced block containing an underline does not create a heading', () => {
+  const src = 'Text\n\n```\nInside\n---\n```\n\n[b](#inside)\n';
+  assert.deepStrictEqual(extract(src).headings, []);
+  const dir = fixture({ 'a.md': src });
   assert.strictEqual(checkFile(`${dir}/a.md`).problems[0].code, CODES.ANCHOR_NOT_FOUND);
+});
+
+test('trailing whitespace on the text lines does not leak into the slug', () => {
+  // cmark-gfm runs `remove_trailing_blank_lines` over the paragraph buffer
+  // before the block becomes a heading, so the spaces never reach the anchor.
+  // Without that, `Title  ` slugs as `title--` and every link to it breaks.
+  // Verified against zenany/weekly's fo.md, whose setext H1 ends in two spaces.
+  const doc = extract('佛学  \n========  \n');
+  assert.strictEqual(doc.headings.length, 1);
+  assert.strictEqual(doc.headings[0].text, '佛学');
+  assert.strictEqual(slugify(doc.headings[0].text), '佛学');
+});
+
+test('a fence between paragraph text and its underline breaks the setext heading', () => {
+  // The paragraph does not survive a code fence, so the `---` after the
+  // closing fence underlines nothing and must not become a heading.
+  const src = 'Paragraph text\n\n```\ncode\n```\n---\n';
+  assert.deepStrictEqual(extract(src).headings, []);
+});
+
+test('a thematic break after an ATX heading does not turn it into a setext one', () => {
+  // `# ATX` followed by `---` is a heading plus a horizontal rule. If the ATX
+  // line left a paragraph open, the `---` would convert it a second time and
+  // the file would claim an anchor nobody can find.
+  const doc = extract('# ATX\n---\n');
+  assert.strictEqual(doc.headings.length, 1);
+  assert.strictEqual(doc.headings[0].text, 'ATX');
 });
 
 test('a heading with no links is still counted as a checked file', () => {

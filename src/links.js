@@ -292,12 +292,56 @@ function extract(source) {
   const headings = [];
   const unclosedFences = [];
   let inParagraph = false;
+  // The paragraph currently being accumulated, or null. Setext headings can
+  // only be recognised by looking back at the paragraph they terminate, so the
+  // text is buffered rather than slung on the previous line.
+  /** @type {{lines: string[], startLine: number}|null} */
+  let pendingParagraph = null;
 
   for (let idx = 0; idx < lines.length; idx += 1) {
     const line = lines[idx];
     const lineNumber = idx + 1;
 
-    if (fence.isFenced(line, lineNumber)) continue;
+    if (fence.isFenced(line, lineNumber)) {
+      // A fence interrupts an open paragraph: the text before it is not
+      // available to a later setext underline.
+      pendingParagraph = null;
+      inParagraph = false;
+      continue;
+    }
+
+    const blank = /^[ \t]*$/.test(line);
+
+    // A setext underline turns the paragraph above it into a heading, and it
+    // does so *only* when a paragraph is open -- cmark-gfm's
+    // `scan_setext_heading_line` is reached solely from the
+    // `cont_type == CMARK_NODE_PARAGRAPH` branch of `open_new_blocks`.
+    // `===` is level 1, `---` is level 2. An underline with no paragraph above
+    // it (after a blank line, after another heading) is a thematic break.
+    const underline = /^ {0,3}(=+|-+)[ \t]*$/.exec(line);
+    if (underline && pendingParagraph && inParagraph) {
+      headings.push({
+        level: underline[1][0] === '=' ? 1 : 2,
+        // Lines are joined with a space, not a newline. A soft line break
+        // inside a paragraph is rendered as a space, so the heading's text
+        // content is "Setext Beta spans two source lines" -- joining with "\n"
+        // instead would let the strip table delete it outright and yield
+        // "setext-betaspans-twosource-lines".
+        text: pendingParagraph.lines.join(' '),
+        line: pendingParagraph.startLine,
+        column: 1,
+      });
+      pendingParagraph = null;
+      inParagraph = false;
+      continue;
+    }
+
+    if (underline) {
+      // A thematic break. It ends any paragraph but contributes no text.
+      pendingParagraph = null;
+      inParagraph = false;
+      continue;
+    }
 
     // An indented code block: 4+ spaces (or a tab) at the start of a line that
     // does not continue a paragraph. CommonMark calls a line that follows a
@@ -306,27 +350,43 @@ function extract(source) {
     // paragraph" is therefore required; looking only at the previous line's
     // indentation is not enough, because a blank line also ends a paragraph
     // while an unindented line does not.
-    if (!/^[ \t]*$/.test(line)) {
+    if (!blank) {
       const indentWidth = line.match(/^[ \t]*/)[0].replace(/\t/g, '    ').length;
       const isLazyContinuation = inParagraph && indentWidth > 0;
       if (indentWidth >= 4 && !isLazyContinuation) {
         inParagraph = false;
+        pendingParagraph = null;
         continue;
       }
       inParagraph = true;
-    } else if (fence.open === null) {
+    } else {
       // A blank line ends a paragraph but does not end an indented code block;
       // the code continues on the next line if that line is also indented.
       inParagraph = false;
+      pendingParagraph = null;
     }
 
     const { text: masked } = maskCodeSpans(line);
 
-    // Headings, but only when the '#'s start the line (setext H1/H2 is not
-    // needed: it produces the same slug and the link targets do not change).
+    // Headings. ATX form (`## Title`) is self-identifying on one line. A setext
+    // underline was already handled above, before its text was accumulated.
     const h = /^ {0,3}(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$/.exec(line);
     if (h) {
       headings.push({ level: h[1].length, text: h[2], line: lineNumber, column: 1 });
+      // An ATX heading is not a paragraph, so a `---` after it is a thematic
+      // break rather than a level-2 heading.
+      pendingParagraph = null;
+      inParagraph = false;
+    } else if (inParagraph) {
+      // Trailing whitespace is stripped from every line of a paragraph before
+      // the paragraph becomes a heading's text, so `Title   ` slugs as `title`
+      // and not `title--`. This mirrors cmark-gfm's
+      // `remove_trailing_blank_lines`, which runs over the paragraph buffer when
+      // the block is finalized -- verified against a real file whose setext H1
+      // carries two trailing spaces.
+      const trimmed = line.replace(/[ \t]+$/, '');
+      if (pendingParagraph) pendingParagraph.lines.push(trimmed);
+      else pendingParagraph = { lines: [trimmed], startLine: lineNumber };
     }
 
     // Indented code blocks (4+ spaces, only when not continuing a paragraph).

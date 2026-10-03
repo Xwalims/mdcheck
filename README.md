@@ -307,8 +307,10 @@ Worth knowing up front:
 
 - It is a line scanner, not a CommonMark parser. It is right about where links
   point and wrong about exotic inline nesting; it never tries to be a renderer.
-- Headings are recognized in ATX form (`## Title`). Setext headings are not
-  collected for anchor purposes.
+- Headings are recognized in both ATX (`## Title`) and setext (`Title` underlined
+  by `===` or `---`) form. The setext rule follows cmark-gfm: an underline only
+  becomes a heading when a paragraph is open above it, so `---` after a blank
+  line or after an ATX heading stays a thematic break.
 - External URLs are checked for shape, never fetched.
 - Reference definitions are file-scoped, as in CommonMark.
 
