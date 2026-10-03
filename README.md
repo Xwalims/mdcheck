@@ -8,7 +8,8 @@ which ones lead nowhere -- including `#anchors` that no longer exist because
 somebody renamed a heading.
 
 ```sh
-npx mdcheck README.md docs/
+git clone https://github.com/Xwalims/mdcheck.git && cd mdcheck
+node bin/mdcheck.js README.md docs/
 ```
 
 ```
@@ -17,7 +18,7 @@ npx mdcheck README.md docs/
 
 <!-- hero -->
 
-[![CI](https://github.com/mdcheck/actions/workflows/ci.yml/badge.svg)](https://github.com/mdcheck/actions/workflows/ci.yml)
+[![CI](https://github.com/Xwalims/mdcheck/actions/workflows/ci.yml/badge.svg)](https://github.com/Xwalims/mdcheck/actions/workflows/ci.yml)
 ![node 20+](https://img.shields.io/badge/node-20+-brightgreen)
 ![MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![dependencies](https://img.shields.io/badge/dependencies-none-2f6f4f)
@@ -54,14 +55,19 @@ mdcheck takes the offline half of the problem seriously:
 
 ## Install
 
+This package is **not published to npm** — that name belongs to an unrelated link
+checker. Run it from a checkout:
+
 ```sh
-npm install --save-dev mdcheck
+git clone https://github.com/Xwalims/mdcheck.git
+cd mdcheck
+node bin/mdcheck.js README.md docs/
 ```
 
-Or run it without installing:
+Or link it into the project you want to check:
 
 ```sh
-npx mdcheck README.md
+npm link          # provides the `mdcheck` command
 ```
 
 Node 20 or newer. Nothing else.
