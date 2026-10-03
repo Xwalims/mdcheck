@@ -34,6 +34,8 @@ Options
                              (shape only; mdcheck never opens a socket)
   --index-file <list>        filenames that make a directory link valid
                              (default: ${DEFAULT_OPTIONS.indexFiles.join(',')})
+  --follow-root-absolute     resolve a leading "/" from the current directory
+                             instead of the filesystem root (site sources)
   --quiet                    only print problems, no summary
   --strict                   treat warnings (e.g. absolute-path) as failures
   -h, --help                 show this help
@@ -195,4 +197,4 @@ function main(argv, io = {}) {
   return failed ? EXIT.PROBLEMS : EXIT.CLEAN;
 }
 
-module.exports = { main, parseArgs, USAGE };
+module.exports = { main, parseArgs, USAGE, FLAGS, VALUED };

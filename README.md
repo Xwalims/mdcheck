@@ -88,6 +88,7 @@ markdown. With no paths, the current directory is checked.
 | `--ext <list>` | `.md,.markdown` | extensions treated as markdown |
 | `--check-external` | off | also check external links (shape only) |
 | `--index-file <list>` | `README.md,index.md` | filenames that make a directory link valid |
+| `--follow-root-absolute` | off | resolve a leading `/` from the current directory instead of the filesystem root |
 | `--quiet` | off | print problems only, no summary |
 | `--strict` | off | treat warnings as failures |
 | `-h`, `--help` | | show usage |

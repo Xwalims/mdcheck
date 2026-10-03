@@ -14,6 +14,7 @@ number came from.
 | `--ext <list>` | `.md,.markdown` | file extensions treated as markdown when walking a directory |
 | `--check-external` | off | also check external links (shape only, never a network call) |
 | `--index-file <list>` | `README.md,index.md` | filenames that make a directory link valid |
+| `--follow-root-absolute` | off | resolve a leading `/` from the current directory instead of the filesystem root |
 | `--quiet` | off | print problems only, no summary |
 | `--strict` | off | treat warnings as failures |
 | `-h`, `--help` | | show usage |

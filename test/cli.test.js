@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const { main, parseArgs } = require('../src/cli.js');
+const { main, parseArgs, FLAGS, VALUED } = require('../src/cli.js');
 const { checkFile, checkPaths, CODES, EXIT, normalizeExtensions, collectFiles } = require('../src/index.js');
 const { fixture, cleanup } = require('./helpers.js');
 
@@ -508,6 +508,44 @@ test('--help and --version exit 0 and print something', () => {
   const version = run(['--version']);
   assert.strictEqual(version.status, 0);
   assert.strictEqual(version.stdout.trim(), require('../package.json').version);
+});
+
+test('every flag the parser accepts is documented in --help', () => {
+  // mdcheck's own error message tells users to "add --follow-root-absolute".
+  // A flag that exists but is missing from --help is a flag nobody can discover,
+  // and the regression is invisible until a user greps the source for it.
+  // Hence this contract test: FLAGS/VALUED are the single source of truth for
+  // what the CLI accepts, and --help must mention every one of them.
+  const help = run(['--help']).stdout;
+  for (const flag of [...FLAGS.keys(), ...VALUED.keys()]) {
+    assert.ok(help.includes(flag), `--help does not document ${flag}`);
+  }
+});
+
+test('every flag --help documents is actually accepted', () => {
+  // The other direction: help text that lists a flag the parser rejects is an
+  // instruction that fails with "unknown option". Scan the usage block for
+  // long flags and require each one to parse. Valued flags get a value, since
+  // "--ext" with nothing after it is correctly a usage error, not acceptance.
+  const usage = run(['--help']).stdout;
+  const documented = new Set(usage.match(/--[a-z][a-z0-9-]*/g) || []);
+  for (const flag of documented) {
+    const argv = VALUED.has(flag) ? [flag, '.md'] : [flag];
+    const parsed = parseArgs(argv);
+    assert.ok(parsed.ok, `--help documents ${flag} but parseArgs rejects it`);
+  }
+});
+
+test('a flag the tool recommends in an error message must exist and be in --help', () => {
+  // src/report.js tells the user to add --follow-root-absolute. Keep the message,
+  // the flag and the help text in lockstep: the suggestion has to be usable.
+  const dir = fixture({ 'a.md': '# A\n\n[missing](does-not-exist.md)\n' });
+  const result = run([`${dir}/a.md`, '--no-color']);
+  const suggested = result.stdout.match(/add --[a-z][a-z0-9-]+/);
+  assert.ok(suggested, 'expected the file-not-found message to suggest a flag');
+  const flag = suggested[0].replace('add ', '');
+  assert.ok(FLAGS.has(flag), `${flag} is suggested to users but is not a real flag`);
+  assert.ok(run(['--help']).stdout.includes(flag), `${flag} is suggested but not in --help`);
 });
 
 // --- CLI output -----------------------------------------------------------
