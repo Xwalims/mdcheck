@@ -528,7 +528,12 @@ test('every flag --help documents is actually accepted', () => {
   // long flags and require each one to parse. Valued flags get a value, since
   // "--ext" with nothing after it is correctly a usage error, not acceptance.
   const usage = run(['--help']).stdout;
-  const documented = new Set(usage.match(/--[a-z][a-z0-9-]*/g) || []);
+  // (?<!-) so a run of dashes cannot yield a flag from its tail. mdcheck's
+  // usage block is indented plain text, so there is no backtick hazard here --
+  // but this regex is also what makes the test survive if the usage block ever
+  // starts quoting flags in markdown code font, which is exactly the bug the
+  // same-style test in textclean shipped with.
+  const documented = new Set([...usage.matchAll(/(?<!-)(--[a-z][a-z0-9-]*)/g)].map((m) => m[1]));
   for (const flag of documented) {
     const argv = VALUED.has(flag) ? [flag, '.md'] : [flag];
     const parsed = parseArgs(argv);
