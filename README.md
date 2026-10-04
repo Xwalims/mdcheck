@@ -31,6 +31,7 @@ node bin/mdcheck.js README.md docs/
 - [What it catches](#what-it-catches)
 - [Exit codes](#exit-codes)
 - [What counts as a problem](#what-counts-as-a-problem)
+  - [Counts tally every code, whatever it is called](#counts-tally-every-code-whatever-it-is-called)
   - [Directory links](#directory-links)
 - [Limitations](#limitations)
 - [License](#license)
@@ -154,6 +155,41 @@ mdcheck README.md docs/ || exit 1
 
 Anchors are compared **case-insensitively** and after percent-decoding, because
 renderers differ on that and a false positive teaches people to ignore mdcheck.
+
+### Counts tally every code, whatever it is called
+
+`report.counts` is keyed by diagnostic code, so a code that happens to share a
+name with a member of `Object.prototype` must still count like any other. It
+does:
+
+```js
+// counts for codes ['file-not-found', '__proto__', 'file-not-found',
+//                   'constructor', 'toString', 'file-not-found']
+{
+  "file-not-found": 3,
+  "__proto__": 1,
+  "constructor": 1,
+  "toString": 1
+}
+```
+
+```
+6 problems in 0 files
+3 file-not-found, 1 __proto__, 1 constructor, 1 toString
+```
+
+`sum(counts)` equals `totals.problems`, every entry is a `number`, and
+`__proto__` is an own key rather than a prototype swap.
+
+Worth knowing why this is not automatic: the obvious tally is
+`counts[code] = (counts[code] ?? 0) + 1`, and that read walks the prototype
+chain. For `constructor` it returns a function, `?? 0` never fires, and the map
+ends up holding the string `"function Object() { [native code] }1"` where a
+count belongs. For `__proto__` it returns `Object.prototype` itself, so `{} + 1`
+is the string `"[object Object]1"` and that string gets assigned as the
+prototype -- the count vanishes with no error to notice. Both shipped at some
+point. The tally now tests for an *own* key and writes through a define, which
+is what `JSON.parse` does with the same name.
 
 ### Directory links
 

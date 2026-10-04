@@ -53,6 +53,54 @@ const CODE_HELP = Object.freeze({
   [CODES.UNRESOLVED_REFERENCE]: 'reference definitions are file-scoped and are not shared between files',
 });
 
+/** The one key name `counts[key] = value` cannot write as data. See bump(). */
+const PROTO = '__proto__';
+
+/**
+ * Add one to `counts[key]`, for any key name at all.
+ *
+ * `counts[key] = (counts[key] ?? 0) + 1` looks equivalent and is not. The read
+ * goes through the prototype chain, so for a key that happens to name a member
+ * of `Object.prototype` it returns that member rather than `undefined`, `?? 0`
+ * does not fire, and the arithmetic runs on the wrong type:
+ *
+ *     const counts = {};
+ *     counts['__proto__'] = (counts['__proto__'] ?? 0) + 1;
+ *     // the read returns Object.prototype itself, and `{} + 1` is the STRING
+ *     // "[object Object]1" -- assigned as the prototype, so the count is
+ *     // simply gone. No error, no own key.
+ *
+ *     counts['constructor'] = (counts['constructor'] ?? 0) + 1;
+ *     // -> "function Object() { [native code] }1", a string in a map whose
+ *     // documented value type is number.
+ *
+ * So the read must use an OWN-property test (returning the inherited `1` for a
+ * genuine count is the whole point), and the write must survive `__proto__`,
+ * which is an accessor on `Object.prototype` rather than a data property.
+ * `assignKey` is what `JSON.parse` does for the same name: it defines a real
+ * own property and leaves the prototype alone. Every other name needs nothing
+ * special -- `constructor`, `toString` and friends are plain data properties,
+ * so assigning shadows them correctly.
+ *
+ * @param {Record<string, number>} counts Map to increment, in place.
+ * @param {string} key Code to count.
+ * @returns {void}
+ */
+function bump(counts, key) {
+  const previous = Object.prototype.hasOwnProperty.call(counts, key) ? counts[key] : 0;
+  const next = previous + 1;
+  if (key === PROTO) {
+    Object.defineProperty(counts, key, {
+      value: next,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    return;
+  }
+  counts[key] = next;
+}
+
 /**
  * Build an empty report.
  * @returns {object}
@@ -84,7 +132,7 @@ function addProblem(report, problem) {
     severity: problem.severity ?? SEVERITY.error,
   };
   report.problems.push(entry);
-  report.counts[entry.code] = (report.counts[entry.code] ?? 0) + 1;
+  bump(report.counts, entry.code);
   report.totals.problems += 1;
   report.ok = report.problems.every((p) => p.severity !== SEVERITY.error);
   return entry;
@@ -116,7 +164,7 @@ function finalize(report) {
   }
   report.counts = {};
   for (const problem of report.problems) {
-    report.counts[problem.code] = (report.counts[problem.code] ?? 0) + 1;
+    bump(report.counts, problem.code);
   }
   report.ok = report.problems.every((p) => p.severity !== SEVERITY.error);
   return report;
