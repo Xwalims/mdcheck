@@ -206,6 +206,66 @@ test('findings inside a fenced block do not include headings', () => {
   );
 });
 
+test('an ATX heading with no text is still a heading', () => {
+  // CommonMark 0.31.2 section "ATX headings" says they "can be empty", and its
+  // own example renders `#` as <h1></h1>. The heading therefore exists, slugs to
+  // the empty string, and owns an anchor -- so `[x](#)` and every duplicate
+  // after it resolve against a real heading rather than against nothing.
+  //
+  // The pattern this replaces required a space or tab after the hashes, so a
+  // bare `#` fell through to the paragraph branch and was recorded as text. The
+  // heading vanished from the document: its anchor was never emitted, so a
+  // SECOND empty heading never got its `-1` suffix either and a link to `#-1`
+  // was reported dangling on a page where it resolves.
+  for (const [source, level] of [
+    ['#', 1],
+    ['##', 2],
+    ['######', 6],
+    ['  #', 1],
+    ['   ##', 2],
+  ]) {
+    const doc = extract(source);
+    assert.deepStrictEqual(
+      doc.headings.map((h) => [h.level, h.text, h.line]),
+      [[level, '', 1]],
+      `${JSON.stringify(source)} should be an empty level-${level} heading`
+    );
+  }
+
+  // `# ` (with the trailing space) already worked and must keep working.
+  assert.deepStrictEqual(extract('# ').headings.map((h) => [h.level, h.text]), [[1, '']]);
+
+  // A closing sequence is still text, not emptiness: `# # #` is an h1 whose
+  // content is the literal text `#`.
+  assert.deepStrictEqual(extract('# # #').headings.map((h) => [h.level, h.text]), [[1, '#']]);
+
+  // Seven hashes is a paragraph, and four spaces of indent is code. Neither is
+  // an empty heading, and neither was ever meant to be.
+  assert.deepStrictEqual(extract('#######').headings, []);
+  assert.deepStrictEqual(extract('    #').headings, []);
+});
+
+test('two empty headings deduplicate the way a renderer does', () => {
+  // The empty slug is a real slug, so a second empty heading takes the `-1`
+  // suffix exactly like any other repeat. Measured against mdcheck's own output
+  // on a document of `#\n\n#\n`: before the fix both headings were dropped and a
+  // link to `#-1` was reported dangling, even though github.com renders
+  // id="" and id="-1".
+  const { Slugger } = require('../src/slug.js');
+  const slugger = new Slugger();
+  const anchors = ['#\n', '#\n']
+    .map((source) => extract(source).headings)
+    .flat()
+    .map((h) => slugger.slug(h.text));
+  assert.deepStrictEqual(anchors, ['', '-1']);
+
+  // A heading whose text strips to empty -- "# ***" -- is the same case and
+  // must behave identically.
+  const stripped = new Slugger();
+  const both = extract('# ***\n\n#\n').headings.map((h) => stripped.slug(h.text));
+  assert.deepStrictEqual(both, ['', '-1']);
+});
+
 test('FenceTracker is a reusable state machine', () => {
   const fence = new FenceTracker();
   assert.strictEqual(fence.isFenced('```', 1), true);

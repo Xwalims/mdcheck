@@ -370,9 +370,34 @@ function extract(source) {
 
     // Headings. ATX form (`## Title`) is self-identifying on one line. A setext
     // underline was already handled above, before its text was accumulated.
-    const h = /^ {0,3}(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$/.exec(line);
+    //
+    // An ATX heading may be EMPTY. CommonMark 0.31.2 says so explicitly ("ATX
+    // headings can be empty") and its example renders `#` as <h1></h1>, so the
+    // separator between the hashes and the text is OPTIONAL. The old pattern
+    // demanded a space or tab, which made a bare `#` fall through to the
+    // paragraph branch: the heading was parsed as text and simply did not exist
+    // as far as the document was concerned. That lost a real anchor -- anything
+    // linked to `#` was reported as dangling -- and, because the heading never
+    // entered the Slugger, a second empty heading never got its `-1` suffix:
+    // the anchors came out "" and "" instead of "" and "-1", so a link to `#-1`
+    // was reported dangling on a page where it works.
+    //
+    // The optional group must not swallow the hashes themselves. The trailing
+    // boundary is what keeps SEVEN hashes a paragraph rather than a level-6
+    // heading whose text is the literal `#`: the opening run has to stop at the
+    // first character that is neither a hash nor a separator, so `#{1,6}` is
+    // followed by a negative lookahead for another `#`. Without it the regex is
+    // free to open on the first six and treat the seventh as content -- and
+    // CommonMark's own example (`####### foo`, which renders as a paragraph)
+    // becomes an h6.
+    const h = /^ {0,3}(#{1,6})(?!#)(?:[ \t]+(.*?))?[ \t]*#*[ \t]*$/.exec(line);
     if (h) {
-      headings.push({ level: h[1].length, text: h[2], line: lineNumber, column: 1 });
+      headings.push({
+        level: h[1].length,
+        text: h[2] === undefined ? '' : h[2],
+        line: lineNumber,
+        column: 1,
+      });
       // An ATX heading is not a paragraph, so a `---` after it is a thematic
       // break rather than a level-2 heading.
       pendingParagraph = null;
