@@ -159,7 +159,69 @@ test('stripInlineMarkup keeps intraword underscores, which GitHub renders litera
   // Underscores that really are delimiters are still removed.
   assert.strictEqual(stripInlineMarkup('_em_'), 'em');
   assert.strictEqual(stripInlineMarkup('__strong__'), 'strong');
-  assert.strictEqual(stripInlineMarkup('__strong__tail'), 'strongtail');
+  // A leading underscore is NOT an opener either. The old regex
+  // `(?<![A-Za-z0-9])_(?=\S)` matched one here -- there is no word character
+  // in front -- so it deleted the `_` of `_a` and `# _a` slugged to `a` where
+  // GitHub emits `_a`. markdown-it-py agrees the underscore is literal.
+  assert.strictEqual(stripInlineMarkup('_a'), '_a');
+  assert.strictEqual(slug('_a'), '_a');
+  assert.strictEqual(stripInlineMarkup('_private_field'), '_private_field');
+  assert.strictEqual(slug('_private_field'), '_private_field');
+  assert.strictEqual(stripInlineMarkup('a_'), 'a_');
+});
+
+test('an unmatched delimiter stays literal, because it renders literal', () => {
+  // Every expectation below is what markdown-it-py renders, verified one by one
+  // rather than guessed. `__strong__tail` does NOT become `strongtail`: the
+  // closing `__` is followed by `t`, so it is not right-flanking and cannot
+  // close anything. The previous version of this file asserted `strongtail`,
+  // which was simply the wrong expectation -- mdcheck was reporting a working
+  // anchor as broken.
+  assert.strictEqual(stripInlineMarkup('__strong__tail'), '__strong__tail');
+  assert.strictEqual(stripInlineMarkup('__a__b'), '__a__b');
+  assert.strictEqual(stripInlineMarkup('_'), '_');
+  assert.strictEqual(stripInlineMarkup('__'), '__');
+  assert.strictEqual(stripInlineMarkup('___'), '___');
+  assert.strictEqual(stripInlineMarkup('_leading underscore'), '_leading underscore');
+  assert.strictEqual(stripInlineMarkup('trailing_'), 'trailing_');
+  // A `*` needs a partner too, and here the run is followed by whitespace, so
+  // it cannot open.
+  assert.strictEqual(stripInlineMarkup('* star *'), '* star *');
+  // Nesting: the inner `_` pair matches, the outer ones cannot because the
+  // text between them is what is left.
+  assert.strictEqual(stripInlineMarkup('_a_b_'), 'a_b');
+  assert.strictEqual(stripInlineMarkup('_under_score_ mixed'), 'under_score mixed');
+  assert.strictEqual(stripInlineMarkup('a _b_ c'), 'a b c');
+  assert.strictEqual(stripInlineMarkup('**bold** and __also__'), 'bold and also');
+  assert.strictEqual(stripInlineMarkup('***both***'), 'both');
+  assert.strictEqual(stripInlineMarkup('~~struck~~'), 'struck');
+});
+
+test('an escaped backtick cannot OPEN a code span but still CLOSES one', () => {
+  // The asymmetry is the renderer's, verified against markdown-it-py's tokens
+  // rather than reasoned about: the inline tokenizer runs the escape rule first,
+  // so `\`` never becomes a delimiter opener -- but the closer search is a raw
+  // `indexOf('`')` over the source with no escape handling at all.
+  //
+  // Opener side: in `` \`a` `` the escaped backtick is literal, and the second,
+  // unescaped backtick has nothing to close, so it is literal too. markdown-it
+  // renders `` `a` `` -- both backticks survive.
+  assert.strictEqual(stripInlineMarkup('\\`a`'), '`a`');
+  // Opener side, the case that mattered: pairing the escaped backtick with the
+  // later unrelated one would swallow `a` into a code span and delete it.
+  assert.strictEqual(stripInlineMarkup('\\`~~< x `'), '`~~< x `');
+  // Closer side: in `` `a\`b` `` the escaped backtick IS the closer, so the
+  // span is `a\` and the trailing `b\`` stays literal text.
+  assert.strictEqual(stripInlineMarkup('`a\\`b`'), 'a\\b`');
+  assert.strictEqual(stripInlineMarkup('`a\\`'), 'a\\');
+  // An escaped backslash is not a shield either: `` `a\\` `` closes normally.
+  assert.strictEqual(stripInlineMarkup('`a\\\\`'), 'a\\\\');
+  // This one lost an underscore before the closer search stopped honouring
+  // escapes: mdcheck emitted `_a-_` where the renderer emits `_a ___,\,>`.
+  // The trailing `_` is emphasis there (it closes the `_` opened before the
+  // backtick), which is exactly why losing the closer cost a real character.
+  assert.strictEqual(stripInlineMarkup('\\_a _`___,\\`,>_'), '_a ___,\\,' + '>');
+  assert.strictEqual(slug('\\_a _`___,\\`,>_'), '_a-___');
 });
 
 test('Slugger.list returns slugs in document order', () => {

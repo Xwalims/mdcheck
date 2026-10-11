@@ -111,7 +111,8 @@ function autolinkSource() {
  * U+10FFFF, and surrogates.
  *
  * @param {string} s source with code spans and escapes already protected
- * @param {(text: string) => string} protect swap literal text out of harm's way
+ * @param {(text: string, opener: string) => string} protect swap literal text
+ *   out of harm's way, remembering the source character it opened with
  * @returns {string}
  */
 function decodeEntities(s, protect) {
@@ -124,13 +125,13 @@ function decodeEntities(s, protect) {
       // HTML5: 0, anything above U+10FFFF and surrogates are parse errors and
       // become U+FFFD. Number.isInteger also catches NaN from a malformed body.
       if (!Number.isInteger(cp) || cp === 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) {
-        return protect('�');
+        return protect('�', '&');
       }
-      return protect(String.fromCodePoint(cp));
+      return protect(String.fromCodePoint(cp), '&');
     }
     const named = NAMED_ENTITIES.get(body);
     if (named === undefined) return m; // not an entity: leave the source alone
-    return protect(named.map((cp) => String.fromCodePoint(cp)).join(''));
+    return protect(named.map((cp) => String.fromCodePoint(cp)).join(''), '&');
   });
 }
 
@@ -171,6 +172,445 @@ function codeSpanContent(text) {
   return text;
 }
 
+/* ------------------------------------------------------------------ *
+ * Emphasis and strikethrough.
+ *
+ * These are resolved with CommonMark's real delimiter algorithm rather than
+ * with regexes, and the difference is not academic. An earlier version deleted
+ * a `_` with `(?<![A-Za-z0-9])_(?=\S)|(?<=\S)_(?![A-Za-z0-9])`, which looks
+ * like it encodes the intraword rule but does not: it has no notion of which
+ * side of a run a delimiter sits on, so it deleted the leading underscore of
+ * `_a`, `# _a` slugged to `a` where GitHub emits `_a`, and mdcheck reported a
+ * working anchor as dangling. Because github-slugger's strip table KEEPS `_`
+ * (while it drops `*` and `~`), an underscore is the only emphasis delimiter
+ * whose mishandling can move an anchor -- which is exactly why this is here
+ * and why `*` cannot be allowed to silently break in exchange.
+ *
+ * The rules implemented are CommonMark's, in the spec's order:
+ *   - flanking: a run is left- / right-flanking per the whitespace and
+ *     punctuation tests, and `_` additionally cannot both open and close
+ *     inside a word;
+ *   - the "rule of three" on run lengths when a delimiter can both open and
+ *     close;
+ *   - matching the first closer against the nearest opener, deleting every
+ *     delimiter between them, and retrying the same closer while it has
+ *     characters left;
+ *   - an unmatched closer stays in the stack as a potential opener unless it
+ *     cannot open at all.
+ * ------------------------------------------------------------------ */
+
+/** @enum {number} */
+const CLASS_WHITESPACE = 0;
+const CLASS_PUNCTUATION = 1;
+const CLASS_OTHER = 2;
+
+/** CommonMark's "whitespace character": Zs plus tab, LF, FF and CR. */
+const WHITESPACE_RE = /[\p{Zs}\t\n\f\r]/u;
+/** CommonMark's "punctuation character": the Unicode P and S categories. */
+const PUNCTUATION_RE = /[\p{P}\p{S}]/u;
+
+/**
+ * @param {string} char one character, or undefined for the end of the line
+ * @returns {number} one of the CLASS_* constants
+ */
+function classify(char) {
+  // The beginning and end of a line count as whitespace, which is what makes a
+  // run at either edge of a heading behave the way the spec describes.
+  if (char === undefined) return CLASS_WHITESPACE;
+  if (WHITESPACE_RE.test(char)) return CLASS_WHITESPACE;
+  if (PUNCTUATION_RE.test(char)) return CLASS_PUNCTUATION;
+  return CLASS_OTHER;
+}
+
+/**
+ * The SOURCE character that occupies `index` in the original heading.
+ *
+ * For protected text this is the first character of the source span that was
+ * swapped out -- a backtick for a code span, a backslash for an escape, `&` for
+ * an entity, `<` for an autolink, `[` for a link -- and NOT the first character
+ * of the text that span renders as. A renderer decides flanking from the raw
+ * source: in `` `a`* `` the `*` is preceded by a BACKTICK, which is punctuation,
+ * so the run cannot open. Reading it as `a`, which is a word character, let it
+ * open and deleted an asterisk the reader can see.
+ *
+ * @param {string} text
+ * @param {number} index
+ * @param {Map<number, string>} source protected codepoint -> the source
+ *   character its span opened with
+ * @returns {string|undefined} undefined when index is out of range
+ */
+function sourceCharAt(text, index, source) {
+  const point = text.codePointAt(index);
+  if (point === undefined) return undefined;
+  const opener = source.get(point);
+  return opener ?? String.fromCodePoint(point);
+}
+
+/**
+ * The index at which the character ending at `index` starts. Astral
+ * characters are two UTF-16 units, so stepping back one from a low surrogate
+ * would classify half a character and get the flanking test wrong.
+ * @param {string} text
+ * @param {number} index
+ * @returns {number} -1 when there is no preceding character
+ */
+function previousCharStart(text, index) {
+  let start = index - 1;
+  if (start < 0) return -1;
+  const unit = text.charCodeAt(start);
+  if (unit >= 0xdc00 && unit <= 0xdfff) start -= 1;
+  return start;
+}
+
+const DELIMITER_CHARS = new Set(['*', '_', '~']);
+
+/**
+ * One delimiter CHARACTER on the stack. A run of three `_` pushes three of
+ * these, each carrying the run's length: cmark works per character, and the
+ * per-run model this file used to have is not equivalent.
+ * @typedef {object} Delim
+ * @property {string} char
+ * @property {number} offset position of this character in the text
+ * @property {number} span how many characters of the source this delimiter is
+ *   markup for: 1 for `*` and `_`, 2 for a `~~` strikethrough pair
+ * @property {number} length length of the RUN it came from, never decremented
+ * @property {boolean} canOpen cleared once this delimiter is used as a closer
+ * @property {boolean} canClose cleared once this delimiter is used as an opener
+ * @property {number} end index of the matching closer, -1 while unmatched
+ */
+
+/**
+ * Decide whether a run can open and/or close emphasis.
+ * @param {string} text
+ * @param {number} start
+ * @param {number} end
+ * @param {string} char
+ * @param {Map<number, string>} source protected codepoint -> source opener
+ * @returns {{canOpen: boolean, canClose: boolean}}
+ */
+function flanking(text, start, end, char, source) {
+  const prevStart = previousCharStart(text, start);
+  const before = classify(prevStart < 0 ? undefined : sourceCharAt(text, prevStart, source));
+  const after = classify(sourceCharAt(text, end, source));
+
+  // Left-flanking: not followed by whitespace, and either not followed by
+  // punctuation or preceded by whitespace/punctuation. Right-flanking is the
+  // mirror image. A run at the very start is treated as preceded by
+  // whitespace, which classify() returns for undefined.
+  const leftFlanking = after !== CLASS_WHITESPACE &&
+    (after !== CLASS_PUNCTUATION || before === CLASS_WHITESPACE || before === CLASS_PUNCTUATION);
+  const rightFlanking = before !== CLASS_WHITESPACE &&
+    (before !== CLASS_PUNCTUATION || after === CLASS_WHITESPACE || after === CLASS_PUNCTUATION);
+
+  if (char === '_') {
+    // The intraword rule, which is what keeps `snake_case` literal.
+    return {
+      canOpen: leftFlanking && (!rightFlanking || before === CLASS_PUNCTUATION),
+      canClose: rightFlanking && (!leftFlanking || after === CLASS_PUNCTUATION),
+    };
+  }
+  // `*` and GFM's `~` have no intraword restriction.
+  return { canOpen: leftFlanking, canClose: rightFlanking };
+}
+
+/**
+ * Remove the delimiters that CommonMark would resolve as emphasis, strong or
+ * strikethrough, leaving the ones that render as literal characters.
+ *
+ * This is a port of cmark's `process_emphasis` (see
+ * markdown-it-py's rules_inline/balance_pairs.py, which follows the same
+ * algorithm), and it follows it in a detail that is easy to get wrong: the
+ * delimiter stack holds ONE ENTRY PER CHARACTER, and each entry's `length` is
+ * the length of the whole run it came from and NEVER CHANGES. An earlier
+ * version here kept one entry per run and decremented `remaining` as
+ * delimiters were consumed -- which sounds equivalent and is not. "Rule of
+ * three" is defined on the original run lengths, and once a run has been
+ * partially consumed the two definitions disagree, which is what produced
+ * `!**!__!_a__` rendering as `!**!__!a_` instead of `!**!_!a`.
+ *
+ * `openersBottom` and the `jumps` table are carried over for the same reason
+ * cmark has them: without them the scan is quadratic on `*a *a *a *a`.
+ *
+ * @param {string} text markup-stripped heading text, private-use placeholders
+ *   for protected literal text
+ * @param {Map<number, string>} source protected codepoint -> the source
+ *   character its span opened with
+ * @returns {string} the same text with matched delimiters deleted
+ */
+function stripEmphasis(text, source) {
+  if (text.length === 0) return text;
+
+  /** @type {Delim[]} */
+  const delims = [];
+  let headerIndex = 0;
+  // Offset just past the previous delimiter's source coverage, or -2 before any
+  // has been seen. Adjacency has to be measured in SOURCE OFFSETS and has to
+  // account for a delimiter's span: the two `~~` of `~~~~` are adjacent and
+  // share a run, while `~~` and a `_` that happen to be one column apart are
+  // not. Comparing offsets alone treated the second `~~` of `~~~~` as a new run
+  // and split the strikethrough, which is what left `~~<` in the anchor where
+  // the renderer had already matched it.
+  let previousEnd = -2;
+
+  for (let i = 0; i < text.length; ) {
+    const point = text.codePointAt(i);
+    const width = String.fromCodePoint(point).length;
+    const isProtected = source.has(point);
+    if (isProtected || !DELIMITER_CHARS.has(String.fromCodePoint(point))) {
+      i += width;
+      continue;
+    }
+    const char = String.fromCodePoint(point);
+    let end = i + width;
+    while (end < text.length) {
+      const next = text.codePointAt(end);
+      if (source.has(next) || String.fromCodePoint(next) !== char) break;
+      end += width;
+    }
+    // The flanking tests see the SOURCE character on either side, which is what
+    // a renderer reads. Run detection above deliberately does not look inside a
+    // protected span: `\*` is an asterisk, but it is a literal one, not a
+    // delimiter. Confusing the two made `A \*b\* c` lose its asterisks.
+    const flags = flanking(text, i, end, char, source);
+
+    // GFM's strikethrough is `~~`, not `~`: a run of one tilde is literal text,
+    // and a run of three is one literal tilde followed by a pair. markdown-it
+    // pushes a pair's two tildes as ONE delimiter whose length is 0, which
+    // disables the rule-of-three test for tildes -- and the same is done here.
+    // Treating every `~` as an emphasis delimiter made `__ <!~_~____` slug to
+    // `__-_____` where GitHub emits `__-___`.
+    let runLength = end - i;
+    let offset = i;
+    if (char === '~') {
+      if (runLength < 2) {
+        i = end;
+        continue;
+      }
+      if (runLength % 2 === 1) {
+        offset += 1; // the leading lone tilde stays literal
+        runLength -= 1;
+      }
+      const tildeFlags = { canOpen: flags.canOpen, canClose: flags.canClose };
+      for (let k = 0; k < runLength; k += 2) {
+        delims.push({
+          char,
+          offset: offset + k,
+          span: 2,
+          length: 0,
+          canOpen: tildeFlags.canOpen,
+          canClose: tildeFlags.canClose,
+          end: -1,
+        });
+      }
+      i = end;
+      continue;
+    }
+
+    for (let k = 0; k < runLength; k += 1) {
+      delims.push({
+        char,
+        offset: i + k,
+        span: 1,
+        length: runLength,
+        canOpen: flags.canOpen,
+        canClose: flags.canClose,
+        // end is the index of the matching closer, -1 while unmatched. On a
+        // match both ends stop being available, which is what stops a
+        // delimiter from pairing twice.
+        end: -1,
+      });
+    }
+    i = end;
+  }
+  if (delims.length === 0) return text;
+
+  const openersBottom = new Map();
+  const jumps = new Array(delims.length).fill(0);
+  const bottomFor = (delim) => `${delim.char}|${delim.canOpen ? 1 : 0}`;
+  const bottomOf = (delim) => {
+    const key = bottomFor(delim);
+    if (!openersBottom.has(key)) openersBottom.set(key, [-1, -1, -1]);
+    return openersBottom.get(key)[delim.length % 3];
+  };
+  const setBottom = (delim, value) => {
+    const key = bottomFor(delim);
+    if (!openersBottom.has(key)) openersBottom.set(key, [-1, -1, -1]);
+    openersBottom.get(key)[delim.length % 3] = value;
+  };
+
+  let closerIndex = 0;
+  while (closerIndex < delims.length) {
+    const closer = delims[closerIndex];
+    // Delimiters belong to one run when adjacent in the source AND the same
+    // character; tracking that lets the opener search start at the run boundary.
+    if (delims[headerIndex].char !== closer.char || previousEnd !== closer.offset) {
+      headerIndex = closerIndex;
+    }
+    previousEnd = closer.offset + closer.span;
+
+    if (!closer.canClose) {
+      closerIndex += 1;
+      continue;
+    }
+
+    const minOpenerIndex = bottomOf(closer);
+    let openerIndex = headerIndex - jumps[headerIndex] - 1;
+    let newMinOpenerIndex = openerIndex;
+    while (openerIndex > minOpenerIndex) {
+      const opener = delims[openerIndex];
+      if (opener.char !== closer.char) {
+        openerIndex -= jumps[openerIndex] + 1;
+        continue;
+      }
+      if (opener.canOpen && opener.end < 0) {
+        // Rule of three, on the ORIGINAL run lengths: if one of the two can
+        // both open and close, their run lengths must not sum to a multiple of
+        // 3 unless both are multiples of 3 themselves.
+        const oddMatch =
+          (opener.canClose || closer.canOpen) &&
+          (opener.length + closer.length) % 3 === 0 &&
+          (opener.length % 3 !== 0 || closer.length % 3 !== 0);
+        if (!oddMatch) {
+          // Delimiters before an opener that cannot open can be skipped
+          // wholesale next time. This is what keeps the algorithm linear.
+          const lastJump =
+            openerIndex > 0 && !delims[openerIndex - 1].canOpen ? jumps[openerIndex - 1] + 1 : 0;
+          jumps[closerIndex] = closerIndex - openerIndex + lastJump;
+          jumps[openerIndex] = lastJump;
+
+          closer.canOpen = false;
+          opener.end = closerIndex;
+          // An opener is matched at most once; clearing canClose stops the
+          // same delimiter being reused as a closer later.
+          opener.canClose = false;
+          newMinOpenerIndex = -1;
+          previousEnd = -2;
+          break;
+        }
+      }
+      openerIndex -= jumps[openerIndex] + 1;
+    }
+    if (newMinOpenerIndex !== -1) setBottom(closer, newMinOpenerIndex);
+    closerIndex += 1;
+  }
+
+  // A matched pair becomes <em>/<strong>: both ends vanish. Everything else
+  // stays literal, which is the whole point -- `_a` renders as `_a` because
+  // that leading `_` never found a closer, not because it was "protected".
+  const matched = new Set();
+  for (const delim of delims) {
+    if (delim.end >= 0) {
+      for (let k = 0; k < delim.span; k += 1) matched.add(delim.offset + k);
+      const closer = delims[delim.end];
+      for (let k = 0; k < closer.span; k += 1) matched.add(closer.offset + k);
+    }
+  }
+  const drop = new Array(text.length).fill(false);
+  for (const offset of matched) drop[offset] = true;
+  let out = '';
+  for (let i = 0; i < text.length; ) {
+    if (drop[i]) {
+      i += 1;
+      continue;
+    }
+    const point = text.codePointAt(i);
+    out += String.fromCodePoint(point);
+    i += String.fromCodePoint(point).length;
+  }
+  return out;
+}
+
+/**
+ * Replace every code span with a placeholder, in one left-to-right pass.
+ *
+ * The rules this has to get right, all of which were wrong before it existed:
+ *
+ *   - A backslash escape is stepped over WITHOUT being interpreted when it
+ *     could be an OPENER. Inside a code span nothing is markup, so `\_` there
+ *     is two characters; outside one, `\`` means that backtick is literal and
+ *     must not be counted as an opener -- otherwise `` \`~~< x `` ` pairs the
+ *     escaped backtick with a later unrelated one and swallows the text
+ *     between. The SAME escape does not shield the CLOSER search; see below.
+ *   - The closer must be a run of EXACTLY the opening length. `` `a`` `` has no
+ *     code span: two backticks cannot close a one-backtick opener, they are
+ *     text. Matching with a plain backreference consumed the first backtick of
+ *     the longer run and treated what followed as code.
+ *   - An opener with no matching closer is not markup at all, and neither is a
+ *     lone backtick. Crucially the text after an unmatched opener stays in the
+ *     SOURCE: a renderer that finds no closer keeps scanning for one, so the
+ *     backtick and everything after it keep their markdown meaning. Swallowing
+ *     the tail instead turned `_`x`,>_` into `x,>`, losing an underscore the
+ *     reader can see.
+ *
+ * @param {string} s raw heading source
+ * @param {(text: string, opener: string) => string} protect
+ * @returns {string}
+ */
+function claimCodeSpans(s, protect) {
+  if (!s.includes('`')) return s;
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    const char = s[i];
+    // Step over an escape pair without resolving it. The escaped character is
+    // emitted verbatim; whatever it is, it cannot open a code span.
+    if (char === '\\' && i + 1 < s.length) {
+      out += s.slice(i, i + 2);
+      i += 2;
+      continue;
+    }
+    if (char !== '`') {
+      out += char;
+      i += 1;
+      continue;
+    }
+    let runEnd = i;
+    while (runEnd < s.length && s[runEnd] === '`') runEnd += 1;
+    const width = runEnd - i;
+    // Find the next run of exactly this many backticks. This scan is RAW: a
+    // backslash does NOT shield a backtick here, because a renderer's closer
+    // search is a plain "find the next backtick" scan over the source with no
+    // escape handling at all (markdown-it's backticks rule does
+    // `state.src.index('`', ...)`, verified against its tokens). So in
+    // `` `a\`b` `` the escaped backtick is the CLOSER: one code span whose
+    // content is `a\`, and the `b\`` after it is literal text. Skipping escapes
+    // here instead left that span unclosed and lost an underscore the reader
+    // can see -- `\_a _`___,\`,>_` slugged to `_a-_` where the renderer emits
+    // `_a ___,\,>_`.
+    //
+    // Escapes are honoured for the OPENER only -- the main loop above steps
+    // over `\`` without interpreting it, because the escape rule runs first and
+    // an escaped backtick never becomes a delimiter. The asymmetry is the
+    // renderer's, not a convenience: openers are found by the inline tokenizer
+    // (which handles escapes) and closers by a raw scan (which does not).
+    let search = runEnd;
+    let closeStart = -1;
+    while (search < s.length) {
+      if (s[search] !== '`') {
+        search += 1;
+        continue;
+      }
+      let end = search;
+      while (end < s.length && s[end] === '`') end += 1;
+      if (end - search === width) {
+        closeStart = search;
+        break;
+      }
+      // A different-width run is not a closer; keep looking past it.
+      search = end;
+    }
+    if (closeStart === -1) {
+      // No closer: the backticks are literal text.
+      out += s.slice(i, runEnd);
+      i = runEnd;
+      continue;
+    }
+    out += protect(codeSpanContent(s.slice(runEnd, closeStart)), '`');
+    i = closeStart + width;
+  }
+  return out;
+}
+
 /**
  * Step 1: remove inline markdown/HTML from heading source, approximating the
  * text a renderer would show.
@@ -205,22 +645,51 @@ function stripInlineMarkup(s) {
   // them.
   /** @type {Map<number, string>} private-use codepoint -> literal text */
   const literal = new Map();
+  // The SOURCE character each protected span opened with. Emphasis flanking is
+  // decided by a renderer from raw source, so a code span looks like a backtick
+  // to the delimiter tests even though it renders as its contents.
+  /** @type {Map<number, string>} private-use codepoint -> source opener */
+  const sourceOpeners = new Map();
   let nextPoint = 0xe000;
-  /** @param {string} text literal text to protect @returns {string} */
-  const protect = (text) => {
+  /**
+   * @param {string} text literal text to protect
+   * @param {string} opener the source character this span opened with
+   * @returns {string}
+   */
+  const protect = (text, opener) => {
     const point = nextPoint++;
     literal.set(point, text);
+    sourceOpeners.set(point, opener);
     return String.fromCodePoint(point);
   };
 
-  let out = String(s).replace(/\\([\\`*_{}[\]()#+\-.!>~|"'])/g, (_m, ch) =>
-    protect(ch)
-  );
+  let out = String(s);
 
-  // A code span opens on a run of N backticks and closes on the next run of
-  // exactly N, so ``` `a`b` ``` is one span. A run with no matching closer
-  // runs to the end of the text.
-  out = out.replace(/(`+)([\s\S]*?)\1/g, (_m, _ticks, text) => protect(codeSpanContent(text)));
+  // Code spans are claimed in a single left-to-right scan, BEFORE escapes are
+  // resolved, and the two rules are entangled enough that regexes in sequence
+  // cannot express them:
+  //
+  //   - inside a code span nothing is markup, so the `\_` in `` `\_x` `` is a
+  //     backslash and an underscore;
+  //   - outside one, `\`` is a literal backtick and cannot OPEN a span. A `\`
+  //     that vanishes before the scanner runs leaves a bare backtick, which the
+  //     scanner then pairs with an unrelated later backtick -- `\`~~< __!__``
+  //     became one code span and the heading lost `~~< __!__`.
+  //
+  // So the scan walks the raw source, stepping over an escape without
+  // interpreting it, and a closer must be a run of exactly the opening length:
+  // `` `a`` `` has no code span at all, because its only candidate closer is two
+  // backticks long. Matching a bare `\1` against the first backtick of a longer
+  // run treated the text between as code and deleted emphasis the reader sees.
+  out = claimCodeSpans(out, protect);
+
+  // Now the escapes that survived outside a code span. CommonMark: "Any ASCII
+  // punctuation character may be backslash-escaped." The class below is all 32
+  // of them, as four ranges. It was previously shorter -- only the characters
+  // Markdown's own syntax cares about -- so `\<` and `\>` stayed raw source and
+  // the HTML tag stripper then ate `<a>` as a tag, deleting text the reader
+  // sees.
+  out = out.replace(/\\([!-\/:-@\[-`{-~])/g, (_m, ch) => protect(ch, '\\'));
 
   // Entity references are decoded BEFORE the tag/autolink strippers run, and the
   // decoded character is protected rather than written out. Two consequences,
@@ -242,7 +711,7 @@ function stripInlineMarkup(s) {
   // matching render order: a `&lt;`-escaped `<` is already protected text by
   // now and is correctly NOT treated as an autolink delimiter.
   out = out.replace(autolinkSource(), (_m, uriBody, emailBody) =>
-    protect(uriBody === undefined ? emailBody : uriBody)
+    protect(uriBody === undefined ? emailBody : uriBody, '<')
   );
 
   // Images contribute only their alt text.
@@ -258,23 +727,18 @@ function stripInlineMarkup(s) {
   // delimiter inside an attribute value is never treated as one.
   out = out.replace(HTML_INLINE, '');
 
-  // Strikethrough / strong / emphasis delimiters.
+  // Emphasis, strong and strikethrough. Resolved by the CommonMark delimiter
+  // algorithm above rather than by regexes, so the intraword rule (`snake_case`
+  // and `_leading` both render literally) comes out right for the reason the
+  // spec says it does. An underscore is the delimiter that matters here:
+  // github-slugger's strip table keeps it and drops `*` and `~`, so an `_` is
+  // the only emphasis character whose wrong handling moves an anchor.
   //
-  // An underscore is NOT an emphasis delimiter when it sits between two word
-  // characters: CommonMark calls this the "intraword" rule, and it exists so
-  // that identifiers like `snake_case` and `max_length` render literally instead
-  // of turning into italics. GitHub follows it, so `# snake_case-kept` really
-  // does slug to `snake_case-kept`. Deleting every `_` here is a false-positive
-  // generator: it makes mdcheck reject a link that works on github.com.
-  //
-  // The lookarounds also skip protected private-use codepoints, which are not
-  // word characters, so an escaped `\_` next to a word stays intact.
-  out = out
-    .replace(/\*\*/g, '')
-    .replace(/(?<![A-Za-z0-9])__(?=\S)|(?<=\S)__(?![A-Za-z0-9])/g, '')
-    .replace(/~~/g, '')
-    .replace(/\*/g, '')
-    .replace(/(?<![A-Za-z0-9])_(?=\S)|(?<=\S)_(?![A-Za-z0-9])/g, '');
+  // Runs before the protected literal text is restored. The flanking tests read
+  // the SOURCE character each placeholder stands for, because that is what a
+  // renderer reads: a code span opens with a backtick in the source, so `` `a`* ``
+  // cannot open on that `*`.
+  out = stripEmphasis(out, sourceOpeners);
 
   // Restore the protected literal text.
   if (literal.size > 0) {
